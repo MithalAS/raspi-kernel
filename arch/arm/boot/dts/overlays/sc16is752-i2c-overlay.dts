@@ -5,15 +5,15 @@
 	compatible = "brcm,bcm2835";
 
 	frag0: fragment@0 {
-		target = <&i2c_arm>;
+		target = <&i2c6>;
 		__overlay__ {
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "okay";
 
-			sc16is752: sc16is752@48 {
+			sc16is752: sc16is752@4b {
 				compatible = "nxp,sc16is752";
-				reg = <0x48>; /* i2c address */
+				reg = <0x4b>; /* i2c address */
 				clocks = <&sc16is752_clk>;
 				interrupt-parent = <&gpio>;
 				interrupts = <24 2>; /* IRQ_TYPE_EDGE_FALLING */
