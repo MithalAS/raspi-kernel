@@ -89,6 +89,7 @@ obj-$(CONFIG_SERIAL_SIFIVE)	+= sifive.o
 obj-$(CONFIG_SERIAL_LITEUART) += liteuart.o
 obj-$(CONFIG_SERIAL_SUNPLUS)	+= sunplus-uart.o
 obj-$(CONFIG_SERIAL_RPI_FW) += rpi-fw-uart.o
+obj-$(CONFIG_SERIAL_XR20M117X_CORE) += xrm117x.o
 
 # GPIOLIB helpers for modem control lines
 obj-$(CONFIG_SERIAL_MCTRL_GPIO)	+= serial_mctrl_gpio.o

@@ -1588,6 +1588,42 @@ config SERIAL_RPI_FW
 	  This is not supported on Raspberry Pi 5 or newer platforms.
 
 	  If unsure, say N.
+	  
+config SERIAL_XR20M117X_CORE
+        tristate
+
+config SERIAL_XR20M117X
+        tristate "XR20M117X serial support"
+        select SERIAL_CORE
+        depends on (SPI_MASTER && !I2C) || I2C
+        help
+          This selects support for XR20M117X serial ports.
+          Supported ICs are XR20M1170/XR20M1172. Select supported buses using options below.
+
+config SERIAL_XR20M117X_I2C
+        bool "XR20M117X for I2C interface"
+        depends on SERIAL_XR20M117X
+        depends on I2C
+        select SERIAL_XR20M117X_CORE if SERIAL_XR20M117X
+        select REGMAP_I2C if I2C
+        default y
+        help
+          Enable XR20M117X driver on I2C bus,
+          If required say y, and say n to i2c if not required,
+          Enabled by default to support oldconfig.
+          You must select at least one bus for the driver to be built.
+
+config SERIAL_XR20M117X_SPI
+        bool "XR20M117X for spi interface"
+        depends on SERIAL_XR20M117X
+        depends on SPI_MASTER
+        select SERIAL_XR20M117X_CORE if SERIAL_XR20M117X
+        select REGMAP_SPI if SPI_MASTER
+        help
+          Enable XR20M117X driver on SPI bus,
+          If required say y, and say n to spi if not required,
+          This is additional support to existing driver.
+          You must select at least one bus for the driver to be built.
 
 endmenu
 
