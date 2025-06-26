@@ -63,9 +63,9 @@ jobs:
     - name: Install toolchain
       run:
         if [[ "${{matrix.arch}}" == "arm64" ]]; then
-          sudo apt-get install gcc-aarch64-linux-gnu;
+          sudo apt-get install gcc-aarch64-linux-gnu build-essential debhelper;
         else
-          sudo apt-get install gcc-arm-linux-gnueabihf;
+          sudo apt-get install gcc-arm-linux-gnueabihf build-essential debhelper;
         fi
       timeout-minutes: 5
 
@@ -87,8 +87,10 @@ jobs:
           export DTS_SUBDIR=broadcom
           export IMAGE=zImage
         fi
-        make O=${{github.workspace}}/build ${{matrix.defconfig}}
-        scripts/config --file ${{github.workspace}}/build/.config --set-val CONFIG_WERROR y
+
+        # Merge config fragment on top of defconfig
+        ./scripts/kconfig/merge_config.sh -O ${{github.workspace}}/build -m arch/$ARCH/configs/${{matrix.defconfig}} remora_fragment.make
+
         make O=${{github.workspace}}/build -j ${{env.NUM_JOBS}} $IMAGE modules dtbs
         mkdir -p ${{github.workspace}}/install/boot/overlays
         make O=${{github.workspace}}/build INSTALL_MOD_PATH=${{github.workspace}}/install modules_install
@@ -96,6 +98,30 @@ jobs:
         cp ${{github.workspace}}/build/arch/${ARCH}/boot/dts/overlays/*.dtb* ${{github.workspace}}/install/boot/overlays/
         cp ${{github.workspace}}/arch/${ARCH}/boot/dts/overlays/README ${{github.workspace}}/install/boot/overlays/
         cp ${{github.workspace}}/build/arch/${ARCH}/boot/$IMAGE ${{github.workspace}}/install/boot/${{matrix.kernel}}.img
+
+    - name: Package kernel ${{matrix.name}}
+      run: |
+        export ARCH=${{matrix.arch}}
+        if [[ "$ARCH" == "arm64" ]]; then
+          export CROSS_COMPILE=aarch64-linux-gnu-
+        else
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+        fi
+        make O=${{github.workspace}}/build ARCH=$ARCH -j${{env.NUM_JOBS}} bindeb-pkg
+
+    - name: Upload final config
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{matrix.name}}_config
+        path: ${{github.workspace}}/build/.config
+
+    - name: Upload .deb artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{matrix.name}}_deb
+        path: |
+          ${{github.workspace}}/*.deb
+        retention-days: 90
 
     - name: Tar build
       run: tar -cvf ${{matrix.name}}_build.tar -C ${{github.workspace}}/install .
