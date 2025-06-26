@@ -45,8 +45,8 @@
 				pinctrl-names = "default";
 				gpio-controller;
 				#gpio-cells = <2>;
-				spi-max-frequency = <4000000>;
-			};
+				spi-max-frequency = <10000000>;
+	                };
 		};
 	};
 
