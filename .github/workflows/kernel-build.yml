@@ -100,6 +100,9 @@ jobs:
         cp ${{github.workspace}}/build/arch/${ARCH}/boot/$IMAGE ${{github.workspace}}/install/boot/${{matrix.kernel}}.img
 
     - name: Package kernel ${{matrix.name}}
+      env:
+        DPKG_DEB_COMPRESSOR: gzip
+        DPKG_DEB_COMPRESSOR_TYPE: gzip
       run: |
         export ARCH=${{matrix.arch}}
         if [[ "$ARCH" == "arm64" ]]; then
