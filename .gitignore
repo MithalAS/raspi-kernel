@@ -88,6 +88,11 @@ modules.order
 /tar-install/
 
 #
+# Modules-out directory
+#
+/modules-out/
+
+#
 # We don't want to ignore the following even if they are dot-files
 #
 !.clang-format
