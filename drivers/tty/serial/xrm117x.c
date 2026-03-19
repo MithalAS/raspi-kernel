@@ -708,7 +708,7 @@ static void xr20m117x_handle_rx(struct uart_port *port, unsigned int rxlen,
 	unsigned int lsr = 0, ch, flag, bytes_read, i;
 	bool read_lsr = (iir == XRM117X_IIR_RLSE_SRC) ? true : false;
 
-	if (unlikely(rxlen >= sizeof(s->buf))) {
+	if (unlikely(rxlen > sizeof(s->buf))) {
 		dev_warn_ratelimited(port->dev,
 				     "ttyXRM%i: Possible RX FIFO overrun: %d\n",
 				     port->line, rxlen);
@@ -788,55 +788,49 @@ static void xr20m117x_handle_rx(struct uart_port *port, unsigned int rxlen,
 
 static void xr20m117x_handle_tx(struct uart_port *port)
 {
-	struct xr20m117x_port *s = dev_get_drvdata(port->dev);
-	struct circ_buf *xmit = &port->state->xmit;
-	unsigned int txlen, to_send, i;
+    struct xr20m117x_port *s = dev_get_drvdata(port->dev);
+    struct circ_buf *xmit = &port->state->xmit;
+    unsigned int txlen, to_send, i;
 
-	if (unlikely(port->x_char)) {
-		xr20m117x_port_write(port, XRM117X_THR_REG, port->x_char);
-		port->icount.tx++;
-		port->x_char = 0;
-		return;
-	}
+    if (unlikely(port->x_char)) {
+        xr20m117x_port_write(port, XRM117X_THR_REG, port->x_char);
+        port->icount.tx++;
+        port->x_char = 0;
+        return;
+    }
 
-	if (uart_circ_empty(xmit) || uart_tx_stopped(port))
-		return;
+    if (uart_circ_empty(xmit) || uart_tx_stopped(port)) {
+        xr20m117x_port_update(port, XRM117X_IER_REG,
+                              XRM117X_IER_THRI_BIT, 0);
+        return;
+    }
 
-	/* Get length of data pending in circular buffer */
-	to_send = uart_circ_chars_pending(xmit);
-	if (likely(to_send)) {
-		/* Limit to size of TX FIFO */
-		txlen = xr20m117x_port_read(port, XRM117X_TXLVL_REG);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
-		if (txlen > XRM117X_FIFO_SIZE) {
-			dev_err_ratelimited(
-				port->dev,
-				"chip reports %d free bytes in TX fifo, but it only has %d",
-				txlen, XRM117X_FIFO_SIZE);
-			txlen = 0;
-		}
-#endif
-		to_send = (to_send > txlen) ? txlen : to_send;
+    to_send = uart_circ_chars_pending(xmit);
 
-		/* Add data to send */
-		port->icount.tx += to_send;
+    if (likely(to_send)) {
+        txlen = xr20m117x_port_read(port, XRM117X_TXLVL_REG);
 
-		/* Convert to linear buffer */
-		for (i = 0; i < to_send; ++i) {
-			s->buf[i] = xmit->buf[xmit->tail];
-			xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
-		regcache_cache_bypass(s->regmap, true);
-		regmap_raw_write(s->regmap, XRM117X_THR_REG, s->buf, to_send);
-		regcache_cache_bypass(s->regmap, false);
-#else
-		xr20m117x_fifo_write(port, to_send);
-#endif
-	}
+        if (txlen > XRM117X_FIFO_SIZE)
+            txlen = 0;
 
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
-		uart_write_wakeup(port);
+        to_send = (to_send > txlen) ? txlen : to_send;
+
+        port->icount.tx += to_send;
+
+        for (i = 0; i < to_send; ++i) {
+            s->buf[i] = xmit->buf[xmit->tail];
+            xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+        }
+
+        xr20m117x_fifo_write(port, to_send);
+    }
+    if (uart_circ_empty(xmit)) {
+        xr20m117x_port_update(port, XRM117X_IER_REG,
+                              XRM117X_IER_THRI_BIT, 0);
+    }
+
+    if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+        uart_write_wakeup(port);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 3)
@@ -873,6 +867,15 @@ static void xr20m117x_port_irq(struct xr20m117x_port *s, int portno)
 			if (rxlen)
 				xr20m117x_handle_rx(port, rxlen, iir);
 			break;
+
+		case XRM117X_IIR_MSI_SRC:
+		{
+			unsigned int msr;
+		
+			msr = xr20m117x_port_read(port, XRM117X_MSR_REG);
+			uart_handle_cts_change(port, !!(msr & XRM117X_MSR_CTS_BIT));
+			break;
+		}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
 		case XRM117X_IIR_CTSRTS_SRC:
 			msr = xr20m117x_port_read(port, XRM117X_MSR_REG);
@@ -956,6 +959,9 @@ static void xr20m117x_stop_rx(struct uart_port *port)
 static void xr20m117x_start_tx(struct uart_port *port)
 {
 	struct xr20m117x_one *one = to_xr20m117x_one(port, port);
+	xr20m117x_port_update(port, XRM117X_IER_REG,
+                      XRM117X_IER_THRI_BIT,
+                      XRM117X_IER_THRI_BIT);
 
 	/* handle rs485 */
 	if ((one->rs485.flags & SER_RS485_ENABLED) &&
@@ -1151,13 +1157,17 @@ static void xr20m117x_stop_rx(struct uart_port *port)
 
 static void xr20m117x_start_tx(struct uart_port *port)
 {
-	struct xr20m117x_port *s = dev_get_drvdata(port->dev);
-	struct xr20m117x_one *one = to_xr20m117x_one(port, port);
+    struct xr20m117x_port *s = dev_get_drvdata(port->dev);
+    struct xr20m117x_one *one = to_xr20m117x_one(port, port);
+
+    xr20m117x_port_update(port, XRM117X_IER_REG,
+                          XRM117X_IER_THRI_BIT,
+                          XRM117X_IER_THRI_BIT);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
-	kthread_queue_work(&s->kworker, &one->tx_work);
+    kthread_queue_work(&s->kworker, &one->tx_work);
 #else
-	queue_kthread_work(&s->kworker, &one->tx_work);
+    queue_kthread_work(&s->kworker, &one->tx_work);
 #endif
 }
 
@@ -1299,7 +1309,6 @@ static void xr20m117x_set_termios(struct uart_port *port,
 	}
 	/* Update timeout according to new baud rate */
 	uart_update_timeout(port, termios->c_cflag, baud);
-	xr20m117x_dump_register(port);
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 1, 0)
@@ -1494,10 +1503,10 @@ static int xr20m117x_startup(struct uart_port *port)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
 	/* Enable RX, TX, CTS change interrupts */
-	val = XRM117X_IER_RDI_BIT | XRM117X_IER_THRI_BIT | XRM117X_IER_CTSI_BIT;
+	val = XRM117X_IER_RDI_BIT | XRM117X_IER_CTSI_BIT;
 #else
-	/* Enable RX, TX interrupts */
-	val = XRM117X_IER_RDI_BIT | XRM117X_IER_THRI_BIT;
+	/* Enable RX interrupts */
+	val = XRM117X_IER_RDI_BIT;
 #endif
 	xr20m117x_port_write(port, XRM117X_IER_REG, val);
 
