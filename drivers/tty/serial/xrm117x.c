@@ -619,9 +619,10 @@ static int xr20m117x_set_baud(struct uart_port *port, int baud)
 	/* Open the LCR divisors for configuration */
 	xr20m117x_port_write(port, XRM117X_LCR_REG, XRM117X_LCR_CONF_MODE_B);
 
-	/* Enable enhanced features */
+	/* Enable enhanced features, preserving flow-control bits */
 	regcache_cache_bypass(s->regmap, true);
-	xr20m117x_port_write(port, XRM117X_EFR_REG, XRM117X_EFR_ENABLE_BIT);
+	xr20m117x_port_update(port, XRM117X_EFR_REG, XRM117X_EFR_ENABLE_BIT,
+				      XRM117X_EFR_ENABLE_BIT);
 	regcache_cache_bypass(s->regmap, false);
 
 	/* Put LCR back to the normal mode */
@@ -640,13 +641,10 @@ static int xr20m117x_set_baud(struct uart_port *port, int baud)
 	/* Write the new divisor */
 	regcache_cache_bypass(s->regmap, true);
 
-	if (sampling_mode != 0) {
-		/* Change in sampling mode */
-		xr20m117x_port_update(port, XRM117X_DLD_REG,
-				      XRM117X_DLD_SAMPLING_MODE_MASK,
-				      sampling_mode);
-		// printk("xr20m117x_set_baud: Sampling mode changed to %dX mode\n",sampling_factor);
-	}
+	/* Always write sampling mode so 8x/4x is cleared when returning to 16x. */
+	xr20m117x_port_update(port, XRM117X_DLD_REG,
+			      XRM117X_DLD_SAMPLING_MODE_MASK, sampling_mode);
+	// printk("xr20m117x_set_baud: Sampling mode changed to %dX mode\n",sampling_factor);
 
 	xr20m117x_port_write(port, XRM117X_DLM_REG, div_integer / 256);
 	xr20m117x_port_write(port, XRM117X_DLL_REG, div_integer % 256);
@@ -743,7 +741,7 @@ static void xr20m117x_handle_rx(struct uart_port *port, unsigned int rxlen,
 
 		lsr &= XRM117X_LSR_BRK_ERROR_MASK;
 
-		port->icount.rx++;
+		port->icount.rx += bytes_read;
 		flag = TTY_NORMAL;
 
 		if (unlikely(lsr)) {
@@ -840,70 +838,85 @@ static void xr20m117x_port_irq(struct xr20m117x_port *s, int portno)
 #endif
 {
 	struct uart_port *port = &s->p[portno].port;
+	unsigned int iir, rxlen;
 
-	do {
-		unsigned int iir, rxlen;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
+	iir = xr20m117x_port_read(port, XRM117X_IIR_REG);
+	if (iir & XRM117X_IIR_NO_INT_BIT) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 3)
+		return false;
+#else
+		return;
+#endif
+	}
+
+	iir &= XRM117X_IIR_ID_MASK;
+
+	switch (iir) {
+	case XRM117X_IIR_RDI_SRC:
+	case XRM117X_IIR_RLSE_SRC:
+	case XRM117X_IIR_RTOI_SRC:
+	case XRM117X_IIR_XOFFI_SRC:
+		rxlen = xr20m117x_port_read(port, XRM117X_RXLVL_REG);
+		if (rxlen)
+			xr20m117x_handle_rx(port, rxlen, iir);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 3)
+		return true;
+#else
+		return;
+#endif
+
+	case XRM117X_IIR_MSI_SRC:
+	case XRM117X_IIR_CTSRTS_SRC:
+	{
 		unsigned int msr;
-#endif
 
-		iir = xr20m117x_port_read(port, XRM117X_IIR_REG);
-		if (iir & XRM117X_IIR_NO_INT_BIT) {
+		msr = xr20m117x_port_read(port, XRM117X_MSR_REG);
+		uart_handle_cts_change(port, !!(msr & XRM117X_MSR_CTS_BIT));
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 3)
-			return false;
+		return true;
 #else
-			break;
+		return;
 #endif
-		}
+	}
 
-		iir &= XRM117X_IIR_ID_MASK;
-
-		switch (iir) {
-		case XRM117X_IIR_RDI_SRC:
-		case XRM117X_IIR_RLSE_SRC:
-		case XRM117X_IIR_RTOI_SRC:
-		case XRM117X_IIR_XOFFI_SRC:
-			rxlen = xr20m117x_port_read(port, XRM117X_RXLVL_REG);
-			if (rxlen)
-				xr20m117x_handle_rx(port, rxlen, iir);
-			break;
-
-		case XRM117X_IIR_MSI_SRC:
-		{
-			unsigned int msr;
-		
-			msr = xr20m117x_port_read(port, XRM117X_MSR_REG);
-			uart_handle_cts_change(port, !!(msr & XRM117X_MSR_CTS_BIT));
-			break;
-		}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
-		case XRM117X_IIR_CTSRTS_SRC:
-			msr = xr20m117x_port_read(port, XRM117X_MSR_REG);
-			uart_handle_cts_change(port,
-					       !!(msr & XRM117X_MSR_CTS_BIT));
-			break;
+	case XRM117X_IIR_INPIN_SRC:
+		/* Clear input-pin / GPIO interrupt source */
+		(void)xr20m117x_port_read(port, XRM117X_IOSTATE_REG);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 3)
+		return true;
+#else
+		return;
 #endif
-		case XRM117X_IIR_THRI_SRC:
+
+	case XRM117X_IIR_THRI_SRC:
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
-			mutex_lock(&s->mutex);
-			xr20m117x_handle_tx(port);
-			mutex_unlock(&s->mutex);
+		mutex_lock(&s->mutex);
+		xr20m117x_handle_tx(port);
+		mutex_unlock(&s->mutex);
 #else
-			xr20m117x_handle_tx(port);
+		xr20m117x_handle_tx(port);
 #endif
-			break;
-		default:
-			dev_err_ratelimited(
-				port->dev, "ttyXRM%i: Unexpected interrupt: %x",
-				port->line, iir);
-			break;
-		}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 3)
-	} while (0);
-	return true;
+		return true;
 #else
-	} while (1);
+		return;
 #endif
+
+	default:
+		dev_err_ratelimited(port->dev,
+			"ttyXRM%i: Unexpected interrupt: %x lsr=%02x msr=%02x rxlvl=%u iostate=%02x\n",
+			port->line,
+			iir,
+			xr20m117x_port_read(port, XRM117X_LSR_REG),
+			xr20m117x_port_read(port, XRM117X_MSR_REG),
+			xr20m117x_port_read(port, XRM117X_RXLVL_REG),
+			xr20m117x_port_read(port, XRM117X_IOSTATE_REG));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 3)
+		return false;
+#else
+		return;
+#endif
+	}
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
@@ -1071,6 +1084,9 @@ static void xr20m117x_tx_proc(struct kthread_work *ws)
 	    (port->rs485.delay_rts_before_send > 0))
 		msleep(port->rs485.delay_rts_before_send);
 
+	xr20m117x_port_update(port, XRM117X_IER_REG,
+			      XRM117X_IER_THRI_BIT, XRM117X_IER_THRI_BIT);
+
 	xr20m117x_handle_tx(port);
 }
 
@@ -1157,17 +1173,13 @@ static void xr20m117x_stop_rx(struct uart_port *port)
 
 static void xr20m117x_start_tx(struct uart_port *port)
 {
-    struct xr20m117x_port *s = dev_get_drvdata(port->dev);
-    struct xr20m117x_one *one = to_xr20m117x_one(port, port);
-
-    xr20m117x_port_update(port, XRM117X_IER_REG,
-                          XRM117X_IER_THRI_BIT,
-                          XRM117X_IER_THRI_BIT);
+	struct xr20m117x_port *s = dev_get_drvdata(port->dev);
+	struct xr20m117x_one *one = to_xr20m117x_one(port, port);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
-    kthread_queue_work(&s->kworker, &one->tx_work);
+	kthread_queue_work(&s->kworker, &one->tx_work);
 #else
-    queue_kthread_work(&s->kworker, &one->tx_work);
+	queue_kthread_work(&s->kworker, &one->tx_work);
 #endif
 }
 
@@ -1284,7 +1296,7 @@ static void xr20m117x_set_termios(struct uart_port *port,
 	if (termios->c_iflag & IXOFF)
 		flow |= XRM117X_EFR_SWFLOW1_BIT;
 
-	xr20m117x_port_write(port, XRM117X_EFR_REG, flow);
+	xr20m117x_port_write(port, XRM117X_EFR_REG, flow | XRM117X_EFR_ENABLE_BIT);
 	regcache_cache_bypass(s->regmap, false);
 
 	/* Update LCR register */
@@ -1362,14 +1374,20 @@ static int xr20m117x_config_rs485(struct uart_port *port,
 		if (!rts_during_rx && rts_during_tx)
 			efcr |= XRM117X_EFCR_RTS_INVERT_BIT;
 		else if (rts_during_rx && !rts_during_tx)
-			// default
-			else
+			/* default */
+			;
+		else
+			dev_err(port->dev,
+				"unsupported RTS signalling on_send:%d after_send:%d - exactly one of RS485 RTS flags should be set\n",
+				rts_during_tx, rts_during_rx);
 #else
-		if (rts_during_rx == rts_during_tx)
+		if (rts_during_rx == rts_during_tx) {
+			dev_err(port->dev,
+				"unsupported RTS signalling on_send:%d after_send:%d - exactly one of RS485 RTS flags should be set\n",
+				rts_during_tx, rts_during_rx);
+			return -EINVAL;
+		}
 #endif
-				dev_err(port->dev,
-					"unsupported RTS signalling on_send:%d after_send:%d - exactly one of RS485 RTS flags should be set\n",
-					rts_during_tx, rts_during_rx);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
 		/*
@@ -1386,10 +1404,20 @@ static int xr20m117x_config_rs485(struct uart_port *port,
 	xr20m117x_port_update(port, XRM117X_EFCR_REG, mask, efcr);
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+	{
+		unsigned long irqflags;
+
+		spin_lock_irqsave(&port->lock, irqflags);
+		port->rs485 = *rs485;
+		one->config.flags |= XRM117X_RECONF_RS485;
+		spin_unlock_irqrestore(&port->lock, irqflags);
+	}
+#else
 	port->rs485 = *rs485;
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
-	one->config.flags |= XRM117X_RECONF_RS485;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
 	kthread_queue_work(&s->kworker, &one->reg_work);
 #else
@@ -1415,8 +1443,7 @@ static int xr20m117x_ioctl(struct uart_port *port, unsigned int cmd,
 	case TIOCSRS485:
 		if (copy_from_user(&rs485, (void __user *)arg, sizeof(rs485)))
 			return -EFAULT;
-		xr20m117x_config_rs485(port, &rs485);
-		return 0;
+		return xr20m117x_config_rs485(port, &rs485);
 	case TIOCGRS485:
 		if (copy_to_user((void __user *)arg,
 				 &(to_xr20m117x_one(port, port)->rs485),
@@ -1466,20 +1493,18 @@ static int xr20m117x_startup(struct uart_port *port)
 	udelay(5);
 	xr20m117x_port_write(port, XRM117X_FCR_REG, XRM117X_FCR_FIFO_BIT);
 
-	/* Enable EFR */
+	/* Enable enhanced features: EFR is accessible only with LCR = 0xbf. */
 	xr20m117x_port_write(port, XRM117X_LCR_REG, XRM117X_LCR_CONF_MODE_B);
 
 	regcache_cache_bypass(s->regmap, true);
-
-	/* Enable write access to enhanced features and internal clock div */
 	xr20m117x_port_write(port, XRM117X_EFR_REG, XRM117X_EFR_ENABLE_BIT);
 
-	/* Enable TCR/TLR */
+	/* Return to normal register bank before touching MCR/TCR/TLR. */
+	xr20m117x_port_write(port, XRM117X_LCR_REG, XRM117X_LCR_WORD_LEN_8);
+
+	/* Enable TCR/TLR access, then configure flow control levels. */
 	xr20m117x_port_update(port, XRM117X_MCR_REG, XRM117X_MCR_TCRTLR_BIT,
 			      XRM117X_MCR_TCRTLR_BIT);
-
-	/* Configure flow control levels */
-	/* Flow control halt level 48, resume level 24 */
 	xr20m117x_port_write(port, XRM117X_TCR_REG,
 			     XRM117X_TCR_RX_RESUME(24) |
 				     XRM117X_TCR_RX_HALT(48));
