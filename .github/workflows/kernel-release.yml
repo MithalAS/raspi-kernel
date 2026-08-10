@@ -1,0 +1,162 @@
+name: Kernel Release
+
+on:
+  push:
+    tags: ['v*', 'release-*']
+  workflow_dispatch:
+
+env:
+  NUM_JOBS: 4
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - name: "bcm2711-arm64"
+            arch: "arm64"
+            defconfig: "bcm2711_defconfig"
+            kernel: "kernel8"
+          - name: "bcm2711-arm"
+            arch: "arm"
+            defconfig: "bcm2711_defconfig"
+            kernel: "kernel7l"
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        clean: true
+
+    - name: Install toolchain
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        if [[ "${{matrix.arch}}" == "arm64" ]]; then
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu build-essential
+        else
+          sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf build-essential
+        fi
+      timeout-minutes: 5
+
+    - name: Set build version
+      id: version
+      run: |
+        SHORT_SHA=$(git rev-parse --short HEAD)
+        echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+        echo "-rem-${SHORT_SHA}" > localversion-rem
+
+    - name: Configure kernel
+      run: |
+        mkdir -p ${{github.workspace}}/build
+        export ARCH=${{matrix.arch}}
+        if [[ "$ARCH" == "arm64" ]]; then
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export DTS_SUBDIR=broadcom
+          export IMAGE=Image.gz
+        else
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export DTS_SUBDIR=.
+          export IMAGE=zImage
+        fi
+        
+        make O=${{github.workspace}}/build ${{matrix.defconfig}}
+        cat remora_fragment.config >> ${{github.workspace}}/build/.config
+        scripts/config --file ${{github.workspace}}/build/.config --set-val CONFIG_WERROR y
+        make O=${{github.workspace}}/build -j ${{env.NUM_JOBS}} oldconfig < /dev/null
+
+    - name: Build kernel
+      run: |
+        export ARCH=${{matrix.arch}}
+        if [[ "$ARCH" == "arm64" ]]; then
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export DTS_SUBDIR=broadcom
+          export IMAGE=Image.gz
+        else
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export DTS_SUBDIR=.
+          export IMAGE=zImage
+        fi
+        
+        make O=${{github.workspace}}/build -j ${{env.NUM_JOBS}} $IMAGE modules dtbs
+        mkdir -p ${{github.workspace}}/install/boot/overlays
+        make O=${{github.workspace}}/build INSTALL_MOD_PATH=${{github.workspace}}/install modules_install
+        cp ${{github.workspace}}/build/arch/${ARCH}/boot/dts/${DTS_SUBDIR}/*.dtb ${{github.workspace}}/install/boot/
+        cp ${{github.workspace}}/build/arch/${ARCH}/boot/dts/overlays/*.dtb* ${{github.workspace}}/install/boot/overlays/
+        cp ${{github.workspace}}/arch/${ARCH}/boot/dts/overlays/README ${{github.workspace}}/install/boot/overlays/
+        cp ${{github.workspace}}/build/arch/${ARCH}/boot/$IMAGE ${{github.workspace}}/install/boot/${{matrix.kernel}}.img
+
+    - name: Validate XR20M117X driver
+      run: |
+        CONFIG_FILE="${{github.workspace}}/build/.config"
+        BUILD_DIR="${{github.workspace}}/build"
+        
+        # Check driver is enabled in config
+        if ! grep -q "CONFIG_SERIAL_XR20M117X[^_]" "$CONFIG_FILE"; then
+          echo "ERROR: CONFIG_SERIAL_XR20M117X not found in kernel config"
+          exit 1
+        fi
+        
+        # Check driver core is enabled (=y for built-in or =m for module)
+        CORE_CONFIG=$(grep "^CONFIG_SERIAL_XR20M117X_CORE=" "$CONFIG_FILE" || echo "")
+        if [[ -z "$CORE_CONFIG" ]]; then
+          echo "ERROR: CONFIG_SERIAL_XR20M117X_CORE not found in kernel config"
+          exit 1
+        fi
+        
+        echo "Config validation passed:"
+        grep "^CONFIG_SERIAL_XR20M117X" "$CONFIG_FILE"
+        
+        # Verify object file or module was built
+        if [[ "$CORE_CONFIG" == "CONFIG_SERIAL_XR20M117X_CORE=y" ]]; then
+          # For static linking, check the .o file exists in the build tree
+          OBJ_FILE=$(find "$BUILD_DIR" -name "xrm117x.o" 2>/dev/null)
+          if [[ -z "$OBJ_FILE" ]]; then
+            echo "ERROR: XR20M117X object file (xrm117x.o) not found in build"
+            find "$BUILD_DIR" -name "*xrm*" 2>/dev/null || echo "No xrm files found"
+            exit 1
+          fi
+          echo "Static linking validation passed: $OBJ_FILE"
+          # Show that the object is not empty
+          ls -lh "$OBJ_FILE"
+        elif [[ "$CORE_CONFIG" == "CONFIG_SERIAL_XR20M117X_CORE=m" ]]; then
+          # For module, check the .ko file exists
+          KO_FILE=$(find "$BUILD_DIR" -name "xrm117x.ko" 2>/dev/null)
+          if [[ -z "$KO_FILE" ]]; then
+            echo "ERROR: XR20M117X module (xrm117x.ko) not found"
+            find "$BUILD_DIR" -name "*.ko" 2>/dev/null | grep -i xr || true
+            exit 1
+          fi
+          echo "Module validation passed: $KO_FILE"
+          ls -lh "$KO_FILE"
+        else
+          echo "ERROR: Unexpected CONFIG_SERIAL_XR20M117X_CORE value: $CORE_CONFIG"
+          exit 1
+        fi
+
+    - name: Package artifacts
+      run: |
+        cd ${{github.workspace}}/install
+        tar czf ${{github.workspace}}/kernel-${{matrix.name}}-${{steps.version.outputs.short_sha}}.tar.gz boot lib
+        sha256sum ${{github.workspace}}/kernel-${{matrix.name}}-${{steps.version.outputs.short_sha}}.tar.gz > ${{github.workspace}}/kernel-${{matrix.name}}-${{steps.version.outputs.short_sha}}.sha256
+
+    - name: Upload release artifacts
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          ${{github.workspace}}/kernel-${{matrix.name}}-*.tar.gz
+          ${{github.workspace}}/kernel-${{matrix.name}}-*.sha256
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Save config artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{matrix.name}}_config-${{steps.version.outputs.short_sha}}
+        path: ${{github.workspace}}/build/.config
+        retention-days: 30

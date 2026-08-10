@@ -162,3 +162,11 @@ x509.genkey
 
 # Documentation toolchain
 sphinx_*/
+
+# Ignore local build files
+localversion-*
+
+# Keep CI
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
