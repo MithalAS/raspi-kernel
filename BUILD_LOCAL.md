@@ -28,7 +28,11 @@ openssl version
 From the repository root:
 
 ```bash
+# Build ARM32 (default)
 ./build-local.sh
+
+# Build ARM64
+TARGET=arm64 ./build-local.sh
 ```
 
 This will:
@@ -160,20 +164,10 @@ sudo apt-get install -y flex bison
 
 ## Comparing Local vs CI
 
-Local build uses the same:
-
-- Defconfig (bcm2711_defconfig) + `remora_fragment.config`
-- Validation steps
-- Artifact format and install layout
-
-Differences:
-
-- CI also builds arm64 in parallel.
-- CI applies the fragment with `cat >> .config` + `oldconfig`; the local script
-  uses `merge_config.sh` + `olddefconfig` and additionally verifies the fragment
-  was fully applied. Consider aligning `.github/workflows/kernel-build.yml` so
-  CI catches dropped options too.
-- CI sets `CONFIG_WERROR=y`, which is a no-op on this 5.10 tree (see above).
+CI (.github/workflows/kernel-build.yml and kernel-release.yml) runs `build-local.sh`
+directly for both `arm` and `arm64` targets, ensuring local builds and CI cannot
+drift apart. Both environments use the identical configuration, compilation,
+validation, and packaging steps.
 
 ## Speed
 

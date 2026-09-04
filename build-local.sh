@@ -1,39 +1,88 @@
 #!/bin/bash
-# Local Kernel Build Script (arm32 cross-compile)
-# Usage: ./build-local.sh
+# Remora kernel build script (cross-compile).
+#
+# Invoked by both local builds and CI (.github/workflows/*.yml) so that the
+# two cannot drift apart.
+#
+# Usage:
+#   ./build-local.sh [clean|toolchain-pkg]
+#
+# Environment:
+#   TARGET=arm|arm64   Target to build (default: arm)
+#   JOBS=<n>           Parallel jobs (default: nproc)
+#   WERROR=1           Build with -Werror (see note below)
 
-set -e
+set -euo pipefail
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+# Colors (disabled when not attached to a tty, e.g. in CI logs)
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; NC=''
+fi
 
-echo -e "${YELLOW}=== Remora Kernel Build (Local ARM32)${NC}"
+TARGET="${TARGET:-arm}"
+
+# Per-target settings. These are the single source of truth for the CI matrix.
+case "$TARGET" in
+  arm)
+    NAME="bcm2711-arm"
+    ARCH=arm
+    CROSS_COMPILE=arm-linux-gnueabihf-
+    DEFCONFIG=bcm2711_defconfig
+    DTS_SUBDIR=.
+    IMAGE=zImage
+    KERNEL_NAME=kernel7l
+    TOOLCHAIN_PKG=gcc-arm-linux-gnueabihf
+    ;;
+  arm64)
+    NAME="bcm2711-arm64"
+    ARCH=arm64
+    CROSS_COMPILE=aarch64-linux-gnu-
+    DEFCONFIG=bcm2711_defconfig
+    DTS_SUBDIR=broadcom
+    IMAGE=Image.gz
+    KERNEL_NAME=kernel8
+    TOOLCHAIN_PKG=gcc-aarch64-linux-gnu
+    ;;
+  *)
+    echo "ERROR: unknown TARGET '$TARGET' (expected 'arm' or 'arm64')" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "${1:-}" == "toolchain-pkg" ]]; then
+  echo "$TOOLCHAIN_PKG"
+  exit 0
+fi
+
+echo -e "${YELLOW}=== Remora Kernel Build (${NAME})${NC}"
 
 # Check dependencies
 echo -e "${YELLOW}Checking dependencies...${NC}"
-for cmd in arm-linux-gnueabihf-gcc git make; do
-  if ! command -v $cmd &> /dev/null; then
+for cmd in "${CROSS_COMPILE}gcc" git make bc bison flex; do
+  if ! command -v "$cmd" &> /dev/null; then
     echo -e "${RED}ERROR: $cmd not found${NC}"
-    echo "Install with: sudo apt-get install gcc-arm-linux-gnueabihf build-essential"
+    echo "Install with: sudo apt-get install $TOOLCHAIN_PKG build-essential bc bison flex libssl-dev"
     exit 1
   fi
 done
 
 # Setup
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-BUILD_DIR="${REPO_ROOT}/build"
-INSTALL_DIR="${REPO_ROOT}/install"
+# Per-target directories so switching TARGET cannot reuse a stale build tree.
+BUILD_DIR="${REPO_ROOT}/build/${TARGET}"
+INSTALL_DIR="${REPO_ROOT}/install/${TARGET}"
 FRAGMENT="${REPO_ROOT}/remora_fragment.config"
+JOBS="${JOBS:-$(nproc)}"
 
 echo -e "${YELLOW}Repository root: $REPO_ROOT${NC}"
 echo -e "${YELLOW}Build directory: $BUILD_DIR${NC}"
 echo -e "${YELLOW}Install directory: $INSTALL_DIR${NC}"
+echo -e "${YELLOW}Parallel jobs: $JOBS${NC}"
 
 # Clean if requested
-if [[ "$1" == "clean" ]]; then
+if [[ "${1:-}" == "clean" ]]; then
   echo -e "${YELLOW}Cleaning build...${NC}"
   rm -rf "$BUILD_DIR" "$INSTALL_DIR"
 fi
@@ -46,25 +95,27 @@ SHORT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
 echo "-rem-${SHORT_SHA}" > "$REPO_ROOT/localversion-rem"
 echo -e "${GREEN}Build version: -rem-${SHORT_SHA}${NC}"
 
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+  echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+fi
+
 # Configure
 echo -e "${YELLOW}Configuring kernel...${NC}"
-export ARCH=arm
-export CROSS_COMPILE=arm-linux-gnueabihf-
-export DTS_SUBDIR=.
-export IMAGE=zImage
+export ARCH CROSS_COMPILE DTS_SUBDIR IMAGE
 export KCONFIG_CONFIG="$BUILD_DIR/.config"
-KERNEL_NAME=kernel7l
 
 cd "$REPO_ROOT"
-make O="$BUILD_DIR" bcm2711_defconfig
+make O="$BUILD_DIR" "$DEFCONFIG"
 
-# Apply Remora fragment with merge_config.sh so overridden defconfig values are reported
+# Apply the Remora fragment with merge_config.sh rather than appending it to
+# .config: merge_config.sh logs every defconfig value the fragment overrides,
+# so a silently dropped customization is visible in the build log.
 scripts/kconfig/merge_config.sh -m -O "$BUILD_DIR" \
   "$BUILD_DIR/.config" "$FRAGMENT"
 
 # NOTE: CONFIG_WERROR does not exist in Linux 5.10 (it was added in 5.15), so
-# setting it here would be silently dropped by olddefconfig. Use WERROR=1 to
-# opt in to warnings-as-errors via KCFLAGS instead.
+# setting it in .config is silently discarded by olddefconfig. Use WERROR=1.
 MAKE_FLAGS=()
 if [[ "${WERROR:-0}" == "1" ]]; then
   echo -e "${YELLOW}WERROR=1: building with -Werror${NC}"
@@ -100,7 +151,7 @@ grep "CONFIG_LOCALVERSION\|CONFIG_SERIAL_XR20M117X\|CONFIG_OVERLAY_FS" "$BUILD_D
 
 # Build
 echo -e "${YELLOW}Building kernel...${NC}"
-time make O="$BUILD_DIR" -j "$(nproc)" "${MAKE_FLAGS[@]}" "$IMAGE" modules dtbs
+time make O="$BUILD_DIR" -j "$JOBS" "${MAKE_FLAGS[@]}" "$IMAGE" modules dtbs
 
 # Validate driver
 echo -e "${YELLOW}Validating XR20M117X driver...${NC}"
@@ -129,8 +180,17 @@ if [[ "$CORE_CONFIG" == "CONFIG_SERIAL_XR20M117X_CORE=y" ]]; then
   fi
   echo -e "${GREEN}Static linking validation passed: $OBJ_FILE${NC}"
   ls -lh "$OBJ_FILE"
+elif [[ "$CORE_CONFIG" == "CONFIG_SERIAL_XR20M117X_CORE=m" ]]; then
+  KO_FILE=$(find "$BUILD_DIR_FULL" -name "xrm117x.ko" 2>/dev/null)
+  if [[ -z "$KO_FILE" ]]; then
+    echo -e "${RED}ERROR: XR20M117X module (xrm117x.ko) not found${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}Module validation passed: $KO_FILE${NC}"
+  ls -lh "$KO_FILE"
 else
-  echo -e "${YELLOW}Note: Driver configured as module (not static)${NC}"
+  echo -e "${RED}ERROR: Unexpected CONFIG_SERIAL_XR20M117X_CORE value: $CORE_CONFIG${NC}"
+  exit 1
 fi
 
 # Validate overlayfs (required for Docker storage-driver=overlay2)
@@ -149,6 +209,13 @@ done
 echo -e "${GREEN}Overlayfs validation passed:${NC}"
 grep "^CONFIG_OVERLAY_FS" "$CONFIG_FILE"
 
+# overlayfs must be built in, not a module, so "overlay" is present in
+# /proc/filesystems at boot without relying on module loading on the target.
+if grep -q "overlayfs/overlay\.ko" "$BUILD_DIR/modules.order" 2>/dev/null; then
+  echo -e "${RED}ERROR: overlay is built as a module (expected built-in)${NC}"
+  exit 1
+fi
+
 
 # Install modules and boot files (mirrors CI layout)
 echo -e "${YELLOW}Installing modules and boot files...${NC}"
@@ -161,13 +228,18 @@ cp "$BUILD_DIR/arch/${ARCH}/boot/$IMAGE" "$INSTALL_DIR/boot/${KERNEL_NAME}.img"
 
 # Package
 echo -e "${YELLOW}Packaging artifacts...${NC}"
-TARBALL="$REPO_ROOT/kernel-bcm2711-arm-${SHORT_SHA}.tar.gz"
-CHECKSUM="$REPO_ROOT/kernel-bcm2711-arm-${SHORT_SHA}.sha256"
+TARBALL="$REPO_ROOT/kernel-${NAME}-${SHORT_SHA}.tar.gz"
+CHECKSUM="$REPO_ROOT/kernel-${NAME}-${SHORT_SHA}.sha256"
 
 cd "$INSTALL_DIR"
 tar czf "$TARBALL" boot lib
 cd "$REPO_ROOT"
 sha256sum "$(basename "$TARBALL")" > "$CHECKSUM"
+
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
+  echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+fi
 
 echo -e "${GREEN}✓ Build complete!${NC}"
 echo -e "${GREEN}Artifacts:${NC}"
