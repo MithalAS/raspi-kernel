@@ -5,12 +5,13 @@
 # two cannot drift apart.
 #
 # Usage:
-#   ./build-local.sh [clean|toolchain-pkg]
+#   ./build-local.sh [clean] [modules] [toolchain-pkg]
 #
 # Environment:
 #   TARGET=arm|arm64   Target to build (default: arm)
 #   JOBS=<n>           Parallel jobs (default: nproc)
 #   WERROR=1           Build with -Werror (see note below)
+#   STATIC=0|1         Convert module configs to static (default: 1; STATIC=0 preserves modules)
 
 set -euo pipefail
 
@@ -51,10 +52,26 @@ case "$TARGET" in
     ;;
 esac
 
-if [[ "${1:-}" == "toolchain-pkg" ]]; then
-  echo "$TOOLCHAIN_PKG"
-  exit 0
-fi
+STATIC="${STATIC:-1}"
+DO_CLEAN=0
+
+for arg in "$@"; do
+  case "$arg" in
+    toolchain-pkg)
+      echo "$TOOLCHAIN_PKG"
+      exit 0
+      ;;
+    clean)
+      DO_CLEAN=1
+      ;;
+    static|--static)
+      STATIC=1
+      ;;
+    modules|--modules)
+      STATIC=0
+      ;;
+  esac
+done
 
 echo -e "${YELLOW}=== Remora Kernel Build (${NAME})${NC}"
 
@@ -80,15 +97,20 @@ echo -e "${YELLOW}Repository root: $REPO_ROOT${NC}"
 echo -e "${YELLOW}Build directory: $BUILD_DIR${NC}"
 echo -e "${YELLOW}Install directory: $INSTALL_DIR${NC}"
 echo -e "${YELLOW}Parallel jobs: $JOBS${NC}"
+if [[ "$STATIC" == "1" ]]; then
+  echo -e "${YELLOW}Static mode: enabled (converting =m to =y)${NC}"
+else
+  echo -e "${YELLOW}Static mode: disabled (keeping modules =m)${NC}"
+fi
 
 # Clean if requested
-if [[ "${1:-}" == "clean" ]]; then
+if [[ "$DO_CLEAN" -eq 1 ]]; then
   echo -e "${YELLOW}Cleaning build...${NC}"
   rm -rf "$BUILD_DIR" "$INSTALL_DIR"
 fi
 
 # Create directories
-mkdir -p "$BUILD_DIR" "$INSTALL_DIR/boot/overlays"
+mkdir -p "$BUILD_DIR" "$INSTALL_DIR/boot/overlays" "$INSTALL_DIR/lib"
 
 # Set build version
 SHORT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
@@ -122,7 +144,15 @@ if [[ "${WERROR:-0}" == "1" ]]; then
   MAKE_FLAGS+=(KCFLAGS=-Werror)
 fi
 
-# Resolve the merged config: new/dependent symbols get their defaults
+# Resolve the merged config: new/dependent symbols get their defaults.
+# If static mode is enabled, convert all module configs (=m) to built-in (=y).
+if [[ "$STATIC" == "1" ]]; then
+  echo -e "${YELLOW}STATIC=1: converting module configs (=m) to static (=y)...${NC}"
+  make O="$BUILD_DIR" mod2yesconfig
+  MODULE_COUNT=$(grep -c "=m$" "$BUILD_DIR/.config" || true)
+  echo -e "${GREEN}Static mode applied: ${MODULE_COUNT} modules remaining${NC}"
+fi
+
 make O="$BUILD_DIR" olddefconfig
 
 echo -e "${GREEN}Configuration complete${NC}"
@@ -134,6 +164,13 @@ FRAGMENT_OK=1
 while IFS= read -r line; do
   [[ "$line" =~ ^CONFIG_[A-Za-z0-9_]+= ]] || continue
   if ! grep -qxF "$line" "$BUILD_DIR/.config"; then
+    # If static mode is enabled and fragment requested =m, allow =y
+    if [[ "$STATIC" == "1" && "$line" =~ =m$ ]]; then
+      STATIC_LINE="${line%=m}=y"
+      if grep -qxF "$STATIC_LINE" "$BUILD_DIR/.config"; then
+        continue
+      fi
+    fi
     SYM="${line%%=*}"
     ACTUAL=$(grep -E "^($SYM=| *# $SYM is not set)" "$BUILD_DIR/.config" || echo "<absent>")
     echo -e "${RED}ERROR: fragment requested '$line' but config has '$ACTUAL'${NC}"
