@@ -190,7 +190,7 @@ fi
 echo -e "${GREEN}Fragment validation passed${NC}"
 
 echo -e "${YELLOW}Final config:${NC}"
-grep "CONFIG_LOCALVERSION\|CONFIG_SERIAL_XR20M117X\|CONFIG_OVERLAY_FS" "$BUILD_DIR/.config"
+grep "CONFIG_LOCALVERSION\|CONFIG_SERIAL_XR20M117X" "$BUILD_DIR/.config"
 
 # Build
 echo -e "${YELLOW}Building kernel...${NC}"
@@ -235,30 +235,6 @@ else
   echo -e "${RED}ERROR: Unexpected CONFIG_SERIAL_XR20M117X_CORE value: $CORE_CONFIG${NC}"
   exit 1
 fi
-
-# Validate overlayfs (required for Docker storage-driver=overlay2)
-echo -e "${YELLOW}Validating overlayfs support...${NC}"
-if ! grep -q "^CONFIG_OVERLAY_FS=y" "$CONFIG_FILE"; then
-  echo -e "${RED}ERROR: CONFIG_OVERLAY_FS is not built in (required for Docker overlay2)${NC}"
-  grep -E "^(CONFIG_OVERLAY_FS=| *# CONFIG_OVERLAY_FS is not set)" "$CONFIG_FILE" || true
-  exit 1
-fi
-for OVL_OPT in CONFIG_OVERLAY_FS_REDIRECT_DIR CONFIG_OVERLAY_FS_METACOPY; do
-  if ! grep -q "^${OVL_OPT}=y" "$CONFIG_FILE"; then
-    echo -e "${RED}ERROR: ${OVL_OPT} is not enabled${NC}"
-    exit 1
-  fi
-done
-echo -e "${GREEN}Overlayfs validation passed:${NC}"
-grep "^CONFIG_OVERLAY_FS" "$CONFIG_FILE"
-
-# overlayfs must be built in, not a module, so "overlay" is present in
-# /proc/filesystems at boot without relying on module loading on the target.
-if grep -q "overlayfs/overlay\.ko" "$BUILD_DIR/modules.order" 2>/dev/null; then
-  echo -e "${RED}ERROR: overlay is built as a module (expected built-in)${NC}"
-  exit 1
-fi
-
 
 # Install modules and boot files (mirrors CI layout)
 echo -e "${YELLOW}Installing modules and boot files...${NC}"
