@@ -12,7 +12,8 @@ Runs on every push and PR to verify builds work:
 
 - Compiles kernel for both arm64 and arm
 - Validates XR20M117X driver is properly configured
-- **Uploads artifacts** (tarball + checksums + config) for 30 days
+- Builds Debian binary image packages (`linux-image-*.deb`)
+- **Uploads artifacts** (tarball + checksums + deb + config) for 30 days
 - Fails fast if anything is broken
 
 Useful for bisecting issues, testing patches on specific commits.
@@ -28,6 +29,7 @@ Runs the same build + validation, then:
 
 - Creates `kernel-{arch}-{short_sha}.tar.gz` (boot/ + lib/)
 - Generates `kernel-{arch}-{short_sha}.sha256` checksums
+- Builds Debian package (`linux-image-*.deb`)
 - **Attaches artifacts to GitHub Release** (if on a tag) — **permanent**
 - Stores configs in CI artifacts for 30 days (if manual trigger)
 

@@ -5,12 +5,16 @@
 # two cannot drift apart.
 #
 # Usage:
-#   ./build-local.sh [clean|toolchain-pkg]
+#   ./build-local.sh [clean] [deb|bindeb-pkg]
+#   ./build-local.sh toolchain-pkg
 #
 # Environment:
-#   TARGET=arm|arm64   Target to build (default: arm)
-#   JOBS=<n>           Parallel jobs (default: nproc)
-#   WERROR=1           Build with -Werror (see note below)
+#   TARGET=arm|arm64        Target to build (default: arm)
+#   BUILD_DEB=1             Build Debian packages via bindeb-pkg (or pass 'deb' / 'bindeb-pkg')
+#   KDEB_PKGVERSION=<ver>   Override Debian package version (defaults to <kernelver>-rem-<tag>-1)
+#   KDEB_COMPRESS=<type>    Debian package compression: gzip, xz, etc. (default: gzip)
+#   JOBS=<n>                Parallel jobs (default: nproc)
+#   WERROR=1                Build with -Werror (see note below)
 
 set -euo pipefail
 
@@ -51,19 +55,41 @@ case "$TARGET" in
     ;;
 esac
 
-if [[ "${1:-}" == "toolchain-pkg" ]]; then
-  echo "$TOOLCHAIN_PKG"
-  exit 0
-fi
+BUILD_DEB="${BUILD_DEB:-${DEB:-0}}"
+DO_CLEAN=0
+
+for arg in "$@"; do
+  case "$arg" in
+    toolchain-pkg)
+      echo "$TOOLCHAIN_PKG"
+      exit 0
+      ;;
+    clean)
+      DO_CLEAN=1
+      ;;
+    deb|bindeb-pkg)
+      BUILD_DEB=1
+      ;;
+    *)
+      echo "ERROR: unknown argument '$arg' (expected 'clean', 'deb', 'bindeb-pkg', or 'toolchain-pkg')" >&2
+      exit 1
+      ;;
+  esac
+done
 
 echo -e "${YELLOW}=== Remora Kernel Build (${NAME})${NC}"
 
 # Check dependencies
 echo -e "${YELLOW}Checking dependencies...${NC}"
-for cmd in "${CROSS_COMPILE}gcc" git make bc bison flex; do
+DEPS=("${CROSS_COMPILE}gcc" git make bc bison flex)
+if [[ "$BUILD_DEB" == "1" ]]; then
+  DEPS+=(dpkg-buildpackage dpkg-deb fakeroot rsync kmod cpio)
+fi
+
+for cmd in "${DEPS[@]}"; do
   if ! command -v "$cmd" &> /dev/null; then
     echo -e "${RED}ERROR: $cmd not found${NC}"
-    echo "Install with: sudo apt-get install $TOOLCHAIN_PKG build-essential bc bison flex libssl-dev"
+    echo "Install with: sudo apt-get install $TOOLCHAIN_PKG build-essential bc bison flex libssl-dev dpkg-dev fakeroot rsync kmod cpio"
     exit 1
   fi
 done
@@ -80,20 +106,37 @@ echo -e "${YELLOW}Repository root: $REPO_ROOT${NC}"
 echo -e "${YELLOW}Build directory: $BUILD_DIR${NC}"
 echo -e "${YELLOW}Install directory: $INSTALL_DIR${NC}"
 echo -e "${YELLOW}Parallel jobs: $JOBS${NC}"
-
-# Clean if requested
-if [[ "${1:-}" == "clean" ]]; then
-  echo -e "${YELLOW}Cleaning build...${NC}"
-  rm -rf "$BUILD_DIR" "$INSTALL_DIR"
+if [[ "$BUILD_DEB" == "1" ]]; then
+  echo -e "${YELLOW}Debian packages: enabled (bindeb-pkg)${NC}"
 fi
-
-# Create directories
-mkdir -p "$BUILD_DIR" "$INSTALL_DIR/boot/overlays"
 
 # Set build version
 SHORT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
 echo "-rem-${SHORT_SHA}" > "$REPO_ROOT/localversion-rem"
 echo -e "${GREEN}Build version: -rem-${SHORT_SHA}${NC}"
+
+PKG_TAG="${CUSTOM_TAG:-$(git -C "$REPO_ROOT" describe --tags --exact-match 2>/dev/null || echo "$SHORT_SHA")}"
+PKG_TAG="${PKG_TAG#v}"
+
+# Debian packaging settings (bindeb-pkg)
+if [[ "$BUILD_DEB" == "1" ]]; then
+  export KDEB_COMPRESS="${KDEB_COMPRESS:-gzip}"
+  KERNEL_VER=$(make -s kernelversion)
+  export KDEB_PKGVERSION="${KDEB_PKGVERSION:-${KERNEL_VER}-rem-${PKG_TAG}-1}"
+  echo -e "${GREEN}Debian package version: ${KDEB_PKGVERSION} (compression: ${KDEB_COMPRESS})${NC}"
+fi
+
+# Clean if requested
+if [[ "$DO_CLEAN" == "1" ]]; then
+  echo -e "${YELLOW}Cleaning build...${NC}"
+  rm -rf "$BUILD_DIR" "$INSTALL_DIR"
+  rm -f "$REPO_ROOT/build"/*"${SHORT_SHA}"*.deb \
+        "$REPO_ROOT/build"/*"${SHORT_SHA}"*.changes \
+        "$REPO_ROOT/build"/*"${SHORT_SHA}"*.buildinfo 2>/dev/null || true
+fi
+
+# Create directories
+mkdir -p "$BUILD_DIR" "$INSTALL_DIR/boot/overlays"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "name=${NAME}" >> "$GITHUB_OUTPUT"
@@ -236,14 +279,31 @@ tar czf "$TARBALL" boot lib
 cd "$REPO_ROOT"
 sha256sum "$(basename "$TARBALL")" > "$CHECKSUM"
 
+# Build Debian packages if requested
+if [[ "$BUILD_DEB" == "1" ]]; then
+  echo -e "${YELLOW}Building Debian packages (bindeb-pkg)...${NC}"
+  time make O="$BUILD_DIR" -j "$JOBS" "${MAKE_FLAGS[@]}" bindeb-pkg
+  echo -e "${GREEN}✓ Debian packaging complete!${NC}"
+fi
+
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
   echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+  if [[ "$BUILD_DEB" == "1" ]]; then
+    IMAGE_DEB=$(ls -1 "$REPO_ROOT/build"/linux-image-*.deb 2>/dev/null | head -n 1 || true)
+    if [[ -n "$IMAGE_DEB" ]]; then
+      echo "image_deb=${IMAGE_DEB}" >> "$GITHUB_OUTPUT"
+    fi
+  fi
 fi
 
 echo -e "${GREEN}✓ Build complete!${NC}"
 echo -e "${GREEN}Artifacts:${NC}"
 ls -lh "$TARBALL" "$CHECKSUM"
+if [[ "$BUILD_DEB" == "1" ]]; then
+  echo -e "${GREEN}Debian packages:${NC}"
+  ls -lh "$REPO_ROOT/build"/*"${PKG_TAG}"*.deb 2>/dev/null || ls -lh "$REPO_ROOT/build"/*.deb 2>/dev/null || true
+fi
 echo ""
 echo -e "${GREEN}Config:${NC}"
 ls -lh "$BUILD_DIR/.config"

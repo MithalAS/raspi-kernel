@@ -13,7 +13,10 @@ sudo apt-get install -y \
   build-essential \
   flex \
   bison \
-  libssl-dev
+  libssl-dev \
+  dpkg-dev \
+  fakeroot \
+  rsync
 ```
 
 Verify installation:
@@ -33,16 +36,24 @@ From the repository root:
 
 # Build ARM64
 TARGET=arm64 ./build-local.sh
+
+# Build ARM32 with Debian packages (.deb)
+./build-local.sh deb
+# or: BUILD_DEB=1 ./build-local.sh
+
+# Build ARM64 with Debian packages (.deb)
+TARGET=arm64 ./build-local.sh deb
 ```
 
 This will:
 
 1. Configure kernel with `bcm2711_defconfig` + Remora overrides (via `merge_config.sh`)
 2. Verify every symbol in `remora_fragment.config` survived config resolution
-3. Cross-compile for ARM32 (armhf)
+3. Cross-compile for ARM32 (armhf) or ARM64 (aarch64)
 4. Validate XR20M117X driver and overlayfs support are present
 5. Install modules + boot files, package into tarball + checksums
-6. Clean, colorized output
+6. Optionally build Debian packages (`bindeb-pkg`) when `deb` or `BUILD_DEB=1` is specified
+7. Clean, colorized output
 
 ## Remora customizations
 
@@ -82,13 +93,34 @@ Everything else Docker requires (cgroups, namespaces, veth, bridge,
 netfilter/NAT, seccomp, memcg, ext4 xattrs/ACLs) is already enabled by
 `bcm2711_defconfig`.
 
+### Debian package build (.deb)
+
+To build Debian packages alongside the tarball:
+
+```bash
+./build-local.sh deb
+# or
+./build-local.sh bindeb-pkg
+```
+
+This runs the kernel's `bindeb-pkg` target with cross-compilation support for both
+`arm` (armhf) and `arm64` (aarch64).
+
+- **Package version (`KDEB_PKGVERSION`)**: Automatically incorporates the kernel
+  version, custom Remora tag, git short SHA from `git rev-parse` (or exact git tag
+  if present), and debian revision, e.g. `5.10.110-rem-f64e2fdb8378-1`. You can
+  override this by exporting `KDEB_PKGVERSION`.
+- **Compression (`KDEB_COMPRESS`)**: Defaults to standard `gzip` compression for
+  broad compatibility. Override by exporting `KDEB_COMPRESS` (e.g. `xz`).
+
 ### Clean build (from scratch)
 
 ```bash
 ./build-local.sh clean
 ```
 
-Removes `build/` and `install/` directories, forces full rebuild.
+Removes `build/` and `install/` directories, forces full rebuild. You can also combine
+flags, e.g. `./build-local.sh clean deb`.
 
 ## Output
 
@@ -101,6 +133,14 @@ build/.config                            # Final kernel config
 install/boot/kernel7l.img                # Kernel image
 install/boot/*.dtb, install/boot/overlays/  # Device tree blobs
 install/lib/modules/{version}/           # Installed modules
+```
+
+When built with `deb` / `bindeb-pkg`, you will also find in `build/`:
+
+```
+build/linux-image-{version}_{pkgver}_{arch}.deb    # Kernel image + modules
+build/linux-headers-{version}_{pkgver}_{arch}.deb  # Kernel header files
+build/linux-libc-dev_{pkgver}_{arch}.deb           # Userspace development headers
 ```
 
 ## Troubleshooting Build Errors

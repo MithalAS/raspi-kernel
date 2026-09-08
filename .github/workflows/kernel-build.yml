@@ -28,13 +28,13 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         TOOLCHAIN_PKG=$(TARGET=${{ matrix.target }} ./build-local.sh toolchain-pkg)
-        sudo apt-get update && sudo apt-get install -y "$TOOLCHAIN_PKG" build-essential bc bison flex libssl-dev
+        sudo apt-get update && sudo apt-get install -y "$TOOLCHAIN_PKG" build-essential bc bison flex libssl-dev dpkg-dev fakeroot rsync kmod cpio
       timeout-minutes: 5
 
     - name: Build kernel
       id: build
       run: |
-        TARGET=${{ matrix.target }} JOBS=${{ env.NUM_JOBS }} ./build-local.sh
+        TARGET=${{ matrix.target }} JOBS=${{ env.NUM_JOBS }} ./build-local.sh deb
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -43,5 +43,6 @@ jobs:
         path: |
           ${{ github.workspace }}/kernel-${{ steps.build.outputs.name }}-*.tar.gz
           ${{ github.workspace }}/kernel-${{ steps.build.outputs.name }}-*.sha256
+          ${{ github.workspace }}/build/linux-image-*.deb
           ${{ github.workspace }}/build/${{ matrix.target }}/.config
         retention-days: 30
